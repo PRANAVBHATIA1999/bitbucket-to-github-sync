@@ -1,0 +1,54 @@
+image: debian:latest
+
+pipelines:
+  default:
+    - step:
+        name: "Sync Public Bitbucket Repositories to GitHub"
+        script:
+          # Install necessary tools
+          - apt-get update && apt-get install -y curl jq git
+          - curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          - apt update && apt install gh -y
+
+          # Fetch only public repositories from Bitbucket
+          - |
+            PUBLIC_REPOS=$(curl -s -u "${BITBUCKET_USERNAME}:${BITBUCKET_APP_PASSWORD}" \
+              "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_WORKSPACE}?pagelen=100" | \
+              jq -r '.values[] | select(.is_private == false) | .slug')
+
+            echo "🔍 Public repositories found: $PUBLIC_REPOS"
+
+            # Loop through public repositories and sync them
+            for REPO_NAME in $PUBLIC_REPOS; do
+              echo "Processing public repository: $REPO_NAME"
+
+              # Check if the repository exists on GitHub
+              if GITHUB_TOKEN=${GITHUB_TOKEN} gh repo view "$GITHUB_USERNAME/$REPO_NAME" > /dev/null 2>&1; then
+                echo "GitHub repository $REPO_NAME already exists."
+              else
+                echo "GitHub repository $REPO_NAME does NOT exist. Creating now..."
+                GITHUB_TOKEN=${GITHUB_TOKEN} gh repo create "$GITHUB_USERNAME/$REPO_NAME" --private --confirm
+              fi
+
+              # Clone the Bitbucket repository
+              echo "Cloning Bitbucket repository: $REPO_NAME"
+              git clone --bare https://${BITBUCKET_USERNAME}:${BITBUCKET_APP_PASSWORD}@bitbucket.org/${BITBUCKET_WORKSPACE}/${REPO_NAME}.git || { echo "❌ Cloning failed"; exit 1; }
+
+              # Navigate into the cloned repo
+              cd "$REPO_NAME.git"
+
+              # Remove Bitbucket origin and add GitHub as new remote
+              echo "Switching remote to GitHub..."
+              git remote remove origin
+              git remote add origin https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${REPO_NAME}.git
+
+              # Push all branches and tags to GitHub
+              echo "Pushing repository: $REPO_NAME to GitHub..."
+              git push --mirror origin || { echo "Push failed"; exit 1; }
+
+              # Cleanup
+              cd ..
+              rm -rf "$REPO_NAME.git"
+              echo "Repository $REPO_NAME successfully mirrored to GitHub."
+            done
